@@ -1,4 +1,4 @@
-# 🚀 Doodle Army: Mini Militia Rebuild 2.0
+# 🚀 Doodle Army: Mini 2.0
 
 A fast-paced, zero-lag 2D real-time multiplayer action shooter inspired by **Mini Militia (Doodle Army 2)**. Set in the subterranean asteroid space station **"Broken Space Outpost"**, players fight in mid-air with jetpacks, zero-g floating crates, pulsating anti-gravity core fields, and an arsenal of tactical weaponry.
 
