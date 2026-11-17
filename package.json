@@ -1,0 +1,25 @@
+{
+  "name": "doodle-army-anti-gravity-outpost",
+  "version": "2.0.0",
+  "description": "2D real-time multiplayer shooter game inspired by Mini Militia (Doodle Army 2) with native C++17 client & Node.js WebSocket backend",
+  "scripts": {
+    "start": "cd server && npm start",
+    "dev:server": "cd server && npm run dev",
+    "start:server": "cd server && npm start",
+    "build:client": "cd client && cmake -B build && cmake --build build",
+    "dev:web": "cd client_web && npm run dev",
+    "build:web": "cd client_web && npm run build"
+  },
+  "keywords": [
+    "multiplayer",
+    "game",
+    "cpp17",
+    "raylib",
+    "websocket",
+    "ws",
+    "render",
+    "mini-militia"
+  ],
+  "author": "",
+  "license": "MIT"
+}

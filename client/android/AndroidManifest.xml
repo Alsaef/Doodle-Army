@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.antigravity.minimilitia"
+    android:versionCode="1"
+    android:versionName="1.0.0">
+
+    <uses-sdk
+        android:minSdkVersion="21"
+        android:targetSdkVersion="34" />
+
+    <!-- Network Permissions for IXWebSocket Real-Time Multiplayer -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- Multi-Touch Hardware Support -->
+    <uses-feature android:name="android.hardware.touchscreen" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen.multitouch" android:required="true" />
+    <uses-feature android:name="android.hardware.touchscreen.multitouch.distinct" android:required="true" />
+
+    <!-- OpenGL ES 2.0 / 3.0 Support for Raylib -->
+    <uses-feature android:glEsVersion="0x00020000" android:required="true" />
+
+    <application
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:label="Anti-Gravity Outpost"
+        android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+        android:hasCode="false">
+
+        <!-- NativeActivity locked to Landscape Orientation -->
+        <activity
+            android:name="android.app.NativeActivity"
+            android:label="Anti-Gravity Outpost"
+            android:configChanges="orientation|keyboardHidden|screenSize|screenLayout"
+            android:screenOrientation="landscape"
+            android:launchMode="singleInstance"
+            android:exported="true">
+
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="main" />
+
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+</manifest>

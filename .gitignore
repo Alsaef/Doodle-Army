@@ -1,0 +1,6 @@
+node_modules/
+tools/
+client/build/
+mobile-android/raymob_template/
+server/
+client_web/

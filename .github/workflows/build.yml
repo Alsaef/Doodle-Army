@@ -1,0 +1,39 @@
+name: Build Android APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK & CMake
+        run: |
+          sdkmanager "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+
+      - name: Run Raymob Setup & Build APK
+        working-directory: ./mobile-android
+        run: |
+          chmod +x setup_and_build.sh
+          ./setup_and_build.sh
+
+      - name: Upload Generated APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Space-Outpost-Game-APK
+          path: mobile-android/**/*.apk
