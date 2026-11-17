@@ -23,7 +23,7 @@ public:
     ~TouchControls() = default;
 
     void init(int screenWidth, int screenHeight);
-    void update(int screenWidth, int screenHeight, Vector2 playerScreenPos);
+    void update(int screenWidth, int screenHeight, Vector2 playerScreenPos, float offsetX = 0.0f, float offsetY = 0.0f, float scale = 1.0f);
     void draw(int screenWidth, int screenHeight);
 
     const ControlInputs& getInputs() const { return inputs; }

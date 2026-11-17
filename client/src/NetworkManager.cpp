@@ -39,6 +39,8 @@ NetworkManager::~NetworkManager() {
 
 void NetworkManager::connect(const std::string& url) {
 #if defined(HAS_IXWEBSOCKET)
+    ix::initNetSystem();
+
     if (connected && currentUrl == url && webSocket && webSocket->getReadyState() == ix::ReadyState::Open) {
         return;
     }
@@ -66,23 +68,24 @@ void NetworkManager::connect(const std::string& url) {
 
     webSocket->setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
         if (msg->type == ix::WebSocketMessageType::Open) {
-            {
-                std::lock_guard<std::mutex> lock(queueMutex);
-                connected = true;
-                incomingQueue.push_back("{\"__event__\":\"open\"}");
-            }
-            flushPendingMessages();
+            LifecycleEvent ev;
+            ev.type = "open";
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         } else if (msg->type == ix::WebSocketMessageType::Close) {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            connected = false;
-            incomingQueue.push_back("{\"__event__\":\"close\"}");
+            LifecycleEvent ev;
+            ev.type = "close";
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         } else if (msg->type == ix::WebSocketMessageType::Message) {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            incomingQueue.push_back(msg->str);
+            // Processed directly on background network worker thread!
+            handleRawMessage(msg->str);
         } else if (msg->type == ix::WebSocketMessageType::Error) {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            connected = false;
-            incomingQueue.push_back("{\"__event__\":\"error\",\"message\":\"" + msg->errorInfo.reason + "\"}");
+            LifecycleEvent ev;
+            ev.type = "error";
+            ev.message = msg->errorInfo.reason;
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         }
     });
 
@@ -104,9 +107,21 @@ void NetworkManager::disconnect() {
     roomCode.clear();
     localPlayerId.clear();
     pendingRequest.intent = INTENT_NONE;
-    std::lock_guard<std::mutex> lock(queueMutex);
-    incomingQueue.clear();
-    pendingOutgoingQueue.clear();
+    {
+        std::lock_guard<std::mutex> lock(snapshotMutex);
+        hasNewSnapshot = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        pendingKills.clear();
+        pendingHits.clear();
+        pendingExplosions.clear();
+        pendingLifecycle.clear();
+    }
+    {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        pendingOutgoingQueue.clear();
+    }
 }
 
 void NetworkManager::flushPendingMessages() {
@@ -122,15 +137,73 @@ void NetworkManager::flushPendingMessages() {
 #endif
 }
 
+bool NetworkManager::getLatestSnapshot(GameSnapshot& out) {
+    std::lock_guard<std::mutex> lock(snapshotMutex);
+    if (!hasNewSnapshot) return false;
+    out = std::move(latestSnapshot);
+    hasNewSnapshot = false;
+    return true;
+}
+
 void NetworkManager::pollMessages() {
-    std::deque<std::string> localQueue;
+    // 1. Process latest snapshot (zero JSON parsing on render thread)
+    bool hadSnap = false;
+    GameSnapshot snap;
     {
-        std::lock_guard<std::mutex> lock(queueMutex);
-        localQueue.swap(incomingQueue);
+        std::lock_guard<std::mutex> lock(snapshotMutex);
+        if (hasNewSnapshot) {
+            snap = std::move(latestSnapshot);
+            hasNewSnapshot = false;
+            hadSnap = true;
+        }
+    }
+    if (hadSnap && onGameSnapshotCb) {
+        onGameSnapshotCb(snap);
     }
 
-    for (const auto& raw : localQueue) {
-        handleRawMessage(raw);
+    // 2. Process events
+    std::vector<KillEvent> kills;
+    std::vector<HitEvent> hits;
+    std::vector<ExplosionEvent> explosions;
+    std::vector<LifecycleEvent> lifecycle;
+    {
+        std::lock_guard<std::mutex> lock(eventMutex);
+        kills.swap(pendingKills);
+        hits.swap(pendingHits);
+        explosions.swap(pendingExplosions);
+        lifecycle.swap(pendingLifecycle);
+    }
+
+    for (const auto& ev : lifecycle) {
+        if (ev.type == "open") {
+            connected = true;
+            std::cout << "[WS] Connected successfully to server!" << std::endl;
+            flushPendingMessages();
+        } else if (ev.type == "close") {
+            connected = false;
+            std::cout << "[WS] Disconnected from server." << std::endl;
+            if (onDisconnectCb) onDisconnectCb();
+        } else if (ev.type == "error") {
+            connected = false;
+            std::cout << "[WS Error]: " << ev.message << std::endl;
+            if (onErrorCb) onErrorCb(ev.message);
+        } else if (ev.type == "welcome") {
+            if (onWelcomeCb) onWelcomeCb(ev.playerId);
+        } else if (ev.type == "room_created") {
+            if (onRoomCreatedCb) onRoomCreatedCb(ev.code, ev.playerId, ev.isHost);
+        } else if (ev.type == "room_joined") {
+            if (onRoomJoinedCb) onRoomJoinedCb(ev.code, ev.playerId, ev.isHost);
+        }
+    }
+
+    for (const auto& k : kills) {
+        if (onKillFeedCb) onKillFeedCb(k.killer, k.victim, k.weapon);
+    }
+    for (const auto& h : hits) {
+        if (onHitImpactCb) onHitImpactCb(h.x, h.y, h.damage, h.isHeadshot);
+    }
+    for (const auto& exp : explosions) {
+        if (onExplosionCb) onExplosionCb(exp.x, exp.y, exp.radius);
     }
 }
 
@@ -142,20 +215,11 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
         // Internal lifecycle events
         if (j.contains("__event__")) {
             std::string ev = j["__event__"].get<std::string>();
-            if (ev == "open") {
-                connected = true;
-                std::cout << "[WS] Connected successfully to server!" << std::endl;
-                flushPendingMessages();
-            } else if (ev == "close") {
-                connected = false;
-                std::cout << "[WS] Disconnected from server." << std::endl;
-                if (onDisconnectCb) onDisconnectCb();
-            } else if (ev == "error") {
-                connected = false;
-                std::string err = j.value("message", "Network error");
-                std::cout << "[WS Error]: " << err << std::endl;
-                if (onErrorCb) onErrorCb(err);
-            }
+            LifecycleEvent lev;
+            lev.type = ev;
+            if (ev == "error") lev.message = j.value("message", "Network error");
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(lev));
             return;
         }
 
@@ -189,7 +253,11 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
                 sendJson("quick_play", &p);
             }
 
-            if (onWelcomeCb) onWelcomeCb(localPlayerId);
+            LifecycleEvent ev;
+            ev.type = "welcome";
+            ev.playerId = localPlayerId;
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         }
         // 2. Room created (immediate in-game transition)
         else if (type == "room_created" || type == "ROOM_CREATED") {
@@ -200,7 +268,14 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
                 localPlayerId = payload["player"]["id"].get<std::string>();
             }
             hostStatus = payload.value("isHost", true);
-            if (onRoomCreatedCb) onRoomCreatedCb(roomCode, localPlayerId, hostStatus);
+
+            LifecycleEvent ev;
+            ev.type = "room_created";
+            ev.code = roomCode;
+            ev.playerId = localPlayerId;
+            ev.isHost = hostStatus;
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         }
         // 3. Room joined or Game Start (immediate in-game transition)
         else if (type == "room_joined" || type == "ROOM_JOINED" || type == "game_start" || type == "GAME_START") {
@@ -211,33 +286,137 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
                 localPlayerId = payload["player"]["id"].get<std::string>();
             }
             hostStatus = payload.value("isHost", false);
-            if (onRoomJoinedCb) onRoomJoinedCb(roomCode, localPlayerId, hostStatus);
+
+            LifecycleEvent ev;
+            ev.type = "room_joined";
+            ev.code = roomCode;
+            ev.playerId = localPlayerId;
+            ev.isHost = hostStatus;
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         }
-        // 4. Live 30Hz Game State Snapshots
+        // 4. Live 30Hz Game State Snapshots parsed completely on background network thread
         else if (type == "game_state" || type == "GAME_STATE" || type == "state_update" || type == "STATE_UPDATE") {
-            if (onGameStateCb) onGameStateCb(&payload);
+            GameSnapshot snap;
+            snap.matchDuration = payload.value("matchDuration", 0);
+
+            if (payload.contains("players") && payload["players"].is_object()) {
+                const auto& playersObj = payload["players"];
+                snap.players.reserve(playersObj.size());
+                for (auto it = playersObj.begin(); it != playersObj.end(); ++it) {
+                    NetPlayerSnapshot np;
+                    np.id = it.key();
+                    const auto& pData = it.value();
+                    np.name = pData.value("name", "Soldier");
+                    np.avatarStyle = pData.value("avatarStyle", "soldier");
+                    np.isBot = pData.value("isBot", false);
+                    np.x = pData.value("x", 1200.0f);
+                    np.y = pData.value("y", 800.0f);
+                    np.vx = pData.value("vx", 0.0f);
+                    np.vy = pData.value("vy", 0.0f);
+                    np.aimAngle = pData.value("aimAngle", 0.0f);
+                    np.facing = pData.value("facing", 1);
+                    np.health = pData.value("health", 100);
+                    np.fuel = pData.value("fuel", 100);
+                    np.weapon = pData.value("weapon", "RIFLE");
+                    if (np.weapon == "SMG") np.maxAmmo = 36;
+                    else if (np.weapon == "SHOTGUN") np.maxAmmo = 6;
+                    else if (np.weapon == "SNIPER") np.maxAmmo = 5;
+                    else if (np.weapon == "PISTOL") np.maxAmmo = 12;
+                    else if (np.weapon == "LASER") np.maxAmmo = 14;
+                    else if (np.weapon == "ROCKET") np.maxAmmo = 4;
+                    else np.maxAmmo = 30;
+                    np.ammo = pData.value("ammo", 30);
+                    np.grenades = pData.value("grenades", 2);
+                    np.isDead = pData.value("isDead", false);
+                    np.isFlying = pData.value("isFlying", false);
+                    np.isOnGround = pData.value("isOnGround", false);
+                    np.reloading = pData.value("reloading", false);
+                    np.kills = pData.value("kills", 0);
+                    np.deaths = pData.value("deaths", 0);
+                    np.score = pData.value("score", 0);
+                    np.ping = pData.value("ping", 0);
+                    snap.players.push_back(std::move(np));
+                }
+            }
+
+            if (payload.contains("bullets") && payload["bullets"].is_array()) {
+                const auto& arr = payload["bullets"];
+                snap.bullets.reserve(arr.size());
+                for (const auto& bJson : arr) {
+                    BulletData b;
+                    b.id = bJson.value("id", "");
+                    b.x = bJson.value("x", 0.0f);
+                    b.y = bJson.value("y", 0.0f);
+                    b.vx = bJson.value("vx", 0.0f);
+                    b.vy = bJson.value("vy", 0.0f);
+                    b.color = bJson.value("color", "#fb923c");
+                    b.length = bJson.value("length", 22.0f);
+                    b.weaponType = bJson.value("weaponType", "RIFLE");
+                    snap.bullets.push_back(std::move(b));
+                }
+            }
+
+            if (payload.contains("grenades") && payload["grenades"].is_array()) {
+                const auto& arr = payload["grenades"];
+                snap.grenades.reserve(arr.size());
+                for (const auto& gJson : arr) {
+                    GrenadeData g;
+                    g.id = gJson.value("id", "");
+                    g.x = gJson.value("x", 0.0f);
+                    g.y = gJson.value("y", 0.0f);
+                    g.fuse = gJson.value("fuse", 2500.0f);
+                    snap.grenades.push_back(std::move(g));
+                }
+            }
+
+            if (payload.contains("pickups") && payload["pickups"].is_array()) {
+                const auto& arr = payload["pickups"];
+                snap.pickups.reserve(arr.size());
+                for (const auto& pJson : arr) {
+                    PickupData p;
+                    p.id = pJson.value("id", "");
+                    p.type = pJson.value("type", "HEALTH");
+                    p.x = pJson.value("x", 0.0f);
+                    p.y = pJson.value("y", 0.0f);
+                    p.active = pJson.value("active", true);
+                    snap.pickups.push_back(std::move(p));
+                }
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(snapshotMutex);
+                latestSnapshot = std::move(snap);
+                hasNewSnapshot = true;
+            }
         }
         // 5. Kill feed notifications
         else if (type == "kill_feed" || type == "KILL_FEED") {
-            std::string killer = payload.value("killerName", "Soldier");
-            std::string victim = payload.value("victimName", "Enemy");
-            std::string weapon = payload.value("weapon", "RIFLE");
-            if (onKillFeedCb) onKillFeedCb(killer, victim, weapon);
+            KillEvent k;
+            k.killer = payload.value("killerName", "Soldier");
+            k.victim = payload.value("victimName", "Enemy");
+            k.weapon = payload.value("weapon", "RIFLE");
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingKills.push_back(std::move(k));
         }
         // 6. Combat hit sparks & damage numbers
         else if (type == "hit_impact" || type == "HIT_IMPACT") {
-            float x = payload.value("x", 0.0f);
-            float y = payload.value("y", 0.0f);
-            int damage = payload.value("damage", 10);
-            bool headshot = payload.value("headshot", false);
-            if (onHitImpactCb) onHitImpactCb(x, y, damage, headshot);
+            HitEvent h;
+            h.x = payload.value("x", 0.0f);
+            h.y = payload.value("y", 0.0f);
+            h.damage = payload.value("damage", 10);
+            h.isHeadshot = payload.value("headshot", false);
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingHits.push_back(std::move(h));
         }
         // 7. Grenade explosions
         else if (type == "explosion" || type == "EXPLOSION") {
-            float x = payload.value("x", 0.0f);
-            float y = payload.value("y", 0.0f);
-            float radius = payload.value("radius", 130.0f);
-            if (onExplosionCb) onExplosionCb(x, y, radius);
+            ExplosionEvent exp;
+            exp.x = payload.value("x", 0.0f);
+            exp.y = payload.value("y", 0.0f);
+            exp.radius = payload.value("radius", 130.0f);
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingExplosions.push_back(std::move(exp));
         }
         // 8. Heartbeat pong latency response
         else if (type == "pong" || type == "PONG") {
@@ -248,8 +427,11 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
         }
         // 9. Error response
         else if (type == "error" || type == "ERROR") {
-            std::string msg = payload.value("message", "Unknown error");
-            if (onErrorCb) onErrorCb(msg);
+            LifecycleEvent ev;
+            ev.type = "error";
+            ev.message = payload.value("message", "Unknown error");
+            std::lock_guard<std::mutex> lock(eventMutex);
+            pendingLifecycle.push_back(std::move(ev));
         }
     } catch (const std::exception& e) {
         std::cerr << "[JSON parse error]: " << e.what() << std::endl;

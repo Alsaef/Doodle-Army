@@ -6,6 +6,7 @@
 #include <vector>
 #include <mutex>
 #include <memory>
+#include "GameWorld.hpp"
 
 #if __has_include(<ixwebsocket/IXWebSocket.h>)
 #include <ixwebsocket/IXWebSocket.h>
@@ -32,8 +33,9 @@ public:
     bool isHost() const { return hostStatus; }
     int getPingMs() const { return pingMs; }
 
-    // Call on main loop each frame to dispatch incoming WebSocket events
+    // Call on main loop each frame to dispatch incoming events with zero allocations
     void pollMessages();
+    bool getLatestSnapshot(GameSnapshot& out);
 
     // Outgoing packets (Matching client_web structure exactly)
     void createRoom(const std::string& name, const std::string& avatarStyle, int botCount = 0);
@@ -52,6 +54,7 @@ public:
     void setOnWelcome(std::function<void(const std::string&)> cb) { onWelcomeCb = cb; }
     void setOnRoomCreated(std::function<void(const std::string&, const std::string&, bool)> cb) { onRoomCreatedCb = cb; }
     void setOnRoomJoined(std::function<void(const std::string&, const std::string&, bool)> cb) { onRoomJoinedCb = cb; }
+    void setOnGameSnapshot(std::function<void(const GameSnapshot&)> cb) { onGameSnapshotCb = cb; }
     void setOnGameState(std::function<void(const void*)> cb) { onGameStateCb = cb; }
     void setOnKillFeed(std::function<void(const std::string&, const std::string&, const std::string&)> cb) { onKillFeedCb = cb; }
     void setOnHitImpact(std::function<void(float, float, int, bool)> cb) { onHitImpactCb = cb; }
@@ -79,6 +82,33 @@ private:
         int botCount = 0;
     };
 
+    struct KillEvent {
+        std::string killer;
+        std::string victim;
+        std::string weapon;
+    };
+
+    struct HitEvent {
+        float x;
+        float y;
+        int damage;
+        bool isHeadshot;
+    };
+
+    struct ExplosionEvent {
+        float x;
+        float y;
+        float radius;
+    };
+
+    struct LifecycleEvent {
+        std::string type;
+        std::string code;
+        std::string playerId;
+        bool isHost;
+        std::string message;
+    };
+
     PendingRoomRequest pendingRequest;
 
     bool connected = false;
@@ -89,8 +119,17 @@ private:
     int pingMs = 0;
     uint64_t lastPingSent = 0;
 
+    std::mutex snapshotMutex;
+    GameSnapshot latestSnapshot;
+    bool hasNewSnapshot = false;
+
+    std::mutex eventMutex;
+    std::vector<KillEvent> pendingKills;
+    std::vector<HitEvent> pendingHits;
+    std::vector<ExplosionEvent> pendingExplosions;
+    std::vector<LifecycleEvent> pendingLifecycle;
+
     std::mutex queueMutex;
-    std::deque<std::string> incomingQueue;
     std::vector<std::string> pendingOutgoingQueue;
 
 #ifdef HAS_IXWEBSOCKET
@@ -103,6 +142,7 @@ private:
     std::function<void(const std::string&)> onWelcomeCb;
     std::function<void(const std::string&, const std::string&, bool)> onRoomCreatedCb;
     std::function<void(const std::string&, const std::string&, bool)> onRoomJoinedCb;
+    std::function<void(const GameSnapshot&)> onGameSnapshotCb;
     std::function<void(const void*)> onGameStateCb;
     std::function<void(const std::string&, const std::string&, const std::string&)> onKillFeedCb;
     std::function<void(float, float, int, bool)> onHitImpactCb;

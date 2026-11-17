@@ -41,32 +41,50 @@ const AvatarMeta AVATARS[5] = {
     {"simon", "Simon", "Simon", "", "Long hair & goatee, yellow tactical vest, armored greaves", Color{245, 158, 11, 255}}
 };
 
+#if defined(__ANDROID__) || defined(PLATFORM_ANDROID)
+#include <android/native_activity.h>
+// Force reference so linker pulls android_native_app_glue from libraylib.a into libmain.so
+extern "C" void ANativeActivity_onCreate(ANativeActivity* activity, void* savedState, size_t savedStateSize);
+void* __native_activity_ref = (void*)&ANativeActivity_onCreate;
+#endif
+
 static Texture2D loadTextureCandidate(const std::string& name) {
     std::string searchPaths[] = {
         name,
-        "assets/characters/" + name,
-        "client/assets/characters/" + name,
         "characters/" + name,
+        "char_" + name,
+        "assets/characters/" + name,
         "assets/" + name,
+        "client/assets/characters/" + name,
         "client/assets/" + name
     };
 
     for (const auto& path : searchPaths) {
-        if (FileExists(path.c_str())) {
+        bool shouldTry = false;
+#if defined(__ANDROID__) || defined(PLATFORM_ANDROID)
+        shouldTry = true;
+#else
+        shouldTry = FileExists(path.c_str());
+#endif
+        if (shouldTry) {
             Image img = LoadImage(path.c_str());
             if (img.data != nullptr) {
                 ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
                 Color* pixels = (Color*)img.data;
-                int total = img.width * img.height;
-                for (int p = 0; p < total; ++p) {
-                    if (pixels[p].r > 240 && pixels[p].g > 240 && pixels[p].b > 240) {
-                        pixels[p] = BLANK;
+                if (pixels != nullptr) {
+                    int total = img.width * img.height;
+                    for (int p = 0; p < total; ++p) {
+                        if (pixels[p].r > 240 && pixels[p].g > 240 && pixels[p].b > 240) {
+                            pixels[p] = BLANK;
+                        }
                     }
                 }
                 Texture2D tex = LoadTextureFromImage(img);
-                SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
                 UnloadImage(img);
-                return tex;
+                if (tex.id > 0) {
+                    SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
+                    return tex;
+                }
             }
         }
     }
@@ -92,16 +110,20 @@ static void drawAvatarBadge(const AvatarMeta& meta, Texture2D tex, float cx, flo
 
 int main(int argc, char* argv[]) {
     // 1. Initialize Raylib Window
-    const int screenWidth = 1280;
-    const int screenHeight = 720;
+    const int virtualWidth = 1280;
+    const int virtualHeight = 720;
 
-    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
-    InitWindow(screenWidth, screenHeight, "Doodle Army - Anti-Gravity Outpost");
+    SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT);
+    InitWindow(virtualWidth, virtualHeight, "Doodle Army - Anti-Gravity Outpost");
     SetTargetFPS(60);
+
+    // Resolution Scaling: Fixed high-performance virtual framebuffer
+    RenderTexture2D virtualTarget = LoadRenderTexture(virtualWidth, virtualHeight);
+    SetTextureFilter(virtualTarget.texture, TEXTURE_FILTER_BILINEAR);
 
     // 2. Initialize Subsystems
     TouchControls touchControls;
-    touchControls.init(screenWidth, screenHeight);
+    touchControls.init(virtualWidth, virtualHeight);
 
     NetworkManager network;
     GameWorld world;
@@ -123,7 +145,7 @@ int main(int argc, char* argv[]) {
     // Camera setup for tracking player
     Camera2D camera = {0};
     camera.target = {1200.0f, 650.0f};
-    camera.offset = {screenWidth * 0.5f, screenHeight * 0.5f};
+    camera.offset = {virtualWidth * 0.5f, virtualHeight * 0.5f};
     camera.rotation = 0.0f;
     camera.zoom = 1.0f;
 
@@ -169,9 +191,9 @@ int main(int argc, char* argv[]) {
         statusMessage.clear();
     });
 
-    network.setOnGameState([&](const void* payloadJson) {
-        world.updateFromSnapshot(payloadJson);
-        // Instant state transition (matches client_web behavior):
+    // Zero-allocation snapshot callback decoupled from network thread
+    network.setOnGameSnapshot([&](const GameSnapshot& snap) {
+        world.applySnapshot(snap);
         if (currentState == STATE_CONNECTING) {
             currentState = STATE_PLAYING;
             statusMessage.clear();
@@ -217,7 +239,25 @@ int main(int argc, char* argv[]) {
         int curWidth = GetScreenWidth();
         int curHeight = GetScreenHeight();
 
-        // Update network messages
+        // Calculate scaling and letterboxing/pillarboxing for upscaled blit
+        float scaleX = static_cast<float>(curWidth) / virtualWidth;
+        float scaleY = static_cast<float>(curHeight) / virtualHeight;
+        float scale = fminf(scaleX, scaleY);
+        if (scale <= 0.0f) scale = 1.0f;
+
+        float renderW = virtualWidth * scale;
+        float renderH = virtualHeight * scale;
+        float offsetX = (curWidth - renderW) * 0.5f;
+        float offsetY = (curHeight - renderH) * 0.5f;
+
+        // Map mouse position to virtual coordinate space
+        Vector2 rawMouse = GetMousePosition();
+        Vector2 mouse = {
+            (rawMouse.x - offsetX) / scale,
+            (rawMouse.y - offsetY) / scale
+        };
+
+        // Update network messages (drain background thread snapshot & events)
         network.pollMessages();
 
         // -------------------------------------------------------------
@@ -234,7 +274,7 @@ int main(int argc, char* argv[]) {
                 connectingTimer = 0.0f;
             }
 
-            BeginDrawing();
+            BeginTextureMode(virtualTarget);
             ClearBackground(Color{6, 10, 18, 255});
 
             // Ambient background stars & outpost preview
@@ -242,19 +282,17 @@ int main(int argc, char* argv[]) {
             renderer.renderWorld(world, camera, "");
 
             // Dark sci-fi backdrop overlay
-            DrawRectangle(0, 0, curWidth, curHeight, Color{6, 10, 18, 215});
+            DrawRectangle(0, 0, virtualWidth, virtualHeight, Color{6, 10, 18, 215});
 
             // Glowing central nebula pulse
             float timeSec = static_cast<float>(GetTime());
             float nebulaPulse = 20.0f * sinf(timeSec * 1.5f);
-            DrawCircleGradient(curWidth / 2, curHeight / 2, 260.0f + nebulaPulse,
+            DrawCircleGradient(virtualWidth / 2, virtualHeight / 2, 260.0f + nebulaPulse,
                                Color{14, 165, 233, 20}, BLANK);
-
-            Vector2 mouse = GetMousePosition();
 
             // Top-Right Quick Controls (Fullscreen + Sound)
             float trY = 24.0f;
-            float trX = curWidth - 84.0f;
+            float trX = virtualWidth - 84.0f;
             Rectangle fsBtnRect = {trX, trY, 36.0f, 36.0f};
             Rectangle soundBtnRect = {trX + 44.0f, trY, 36.0f, 36.0f};
 
@@ -298,8 +336,8 @@ int main(int argc, char* argv[]) {
             // ---------------------------------------------------------
             float panelW = 520.0f;
             float panelH = 585.0f;
-            float panelX = (curWidth - panelW) * 0.5f;
-            float panelY = (curHeight - panelH) * 0.5f;
+            float panelX = (virtualWidth - panelW) * 0.5f;
+            float panelY = (virtualHeight - panelH) * 0.5f;
 
             Rectangle panelRect = {panelX, panelY, panelW, panelH};
             DrawRectangleRounded(panelRect, 0.06f, 8, Color{15, 23, 42, 235});
@@ -577,10 +615,10 @@ int main(int argc, char* argv[]) {
             // CREATE ROOM MODAL
             // ---------------------------------------------------------
             if (showCreateModal) {
-                DrawRectangle(0, 0, curWidth, curHeight, Color{0, 0, 0, 180});
+                DrawRectangle(0, 0, virtualWidth, virtualHeight, Color{0, 0, 0, 180});
                 float mw = 420.0f;
                 float mh = 310.0f;
-                Rectangle modalRect = {(curWidth - mw) * 0.5f, (curHeight - mh) * 0.5f, mw, mh};
+                Rectangle modalRect = {(virtualWidth - mw) * 0.5f, (virtualHeight - mh) * 0.5f, mw, mh};
                 DrawRectangleRounded(modalRect, 0.12f, 8, Color{15, 23, 42, 255});
                 DrawRectangleRoundedLines(modalRect, 0.12f, 8, 2.0f, Color{56, 189, 248, 255});
 
@@ -660,10 +698,10 @@ int main(int argc, char* argv[]) {
             // JOIN ROOM MODAL
             // ---------------------------------------------------------
             if (showJoinModal) {
-                DrawRectangle(0, 0, curWidth, curHeight, Color{0, 0, 0, 180});
+                DrawRectangle(0, 0, virtualWidth, virtualHeight, Color{0, 0, 0, 180});
                 float mw = 360.0f;
                 float mh = 220.0f;
-                Rectangle modalRect = {(curWidth - mw) * 0.5f, (curHeight - mh) * 0.5f, mw, mh};
+                Rectangle modalRect = {(virtualWidth - mw) * 0.5f, (virtualHeight - mh) * 0.5f, mw, mh};
                 DrawRectangleRounded(modalRect, 0.15f, 8, Color{15, 23, 42, 255});
                 DrawRectangleRoundedLines(modalRect, 0.15f, 8, 2.0f, Color{56, 189, 248, 255});
 
@@ -719,10 +757,10 @@ int main(int argc, char* argv[]) {
             // CONTROLS & WEAPONS GUIDE MODAL
             // ---------------------------------------------------------
             if (showHelpModal) {
-                DrawRectangle(0, 0, curWidth, curHeight, Color{0, 0, 0, 185});
+                DrawRectangle(0, 0, virtualWidth, virtualHeight, Color{0, 0, 0, 185});
                 float mw = 480.0f;
                 float mh = 510.0f;
-                Rectangle modalRect = {(curWidth - mw) * 0.5f, (curHeight - mh) * 0.5f, mw, mh};
+                Rectangle modalRect = {(virtualWidth - mw) * 0.5f, (virtualHeight - mh) * 0.5f, mw, mh};
                 DrawRectangleRounded(modalRect, 0.1f, 8, Color{15, 23, 42, 255});
                 DrawRectangleRoundedLines(modalRect, 0.1f, 8, 2.0f, Color{56, 189, 248, 255});
 
@@ -778,6 +816,14 @@ int main(int argc, char* argv[]) {
                 }
             }
 
+            EndTextureMode();
+
+            // Upscale virtualTarget to screen
+            BeginDrawing();
+            ClearBackground(BLACK);
+            Rectangle srcRec = { 0.0f, 0.0f, (float)virtualTarget.texture.width, -(float)virtualTarget.texture.height };
+            Rectangle dstRec = { offsetX, offsetY, renderW, renderH };
+            DrawTexturePro(virtualTarget.texture, srcRec, dstRec, { 0.0f, 0.0f }, 0.0f, WHITE);
             EndDrawing();
             continue;
         }
@@ -789,13 +835,13 @@ int main(int argc, char* argv[]) {
         const PlayerData* localPlayer = world.getLocalPlayer(localId);
 
         // Compute local player screen position for mouse aiming calculation
-        Vector2 playerScreenPos = {curWidth * 0.5f, curHeight * 0.5f};
+        Vector2 playerScreenPos = {virtualWidth * 0.5f, virtualHeight * 0.5f};
         if (localPlayer) {
             playerScreenPos = GetWorldToScreen2D({localPlayer->renderX, localPlayer->renderY}, camera);
         }
 
         // Update virtual controls (touches on mobile, WASD+mouse on desktop)
-        touchControls.update(curWidth, curHeight, playerScreenPos);
+        touchControls.update(virtualWidth, virtualHeight, playerScreenPos, offsetX, offsetY, scale);
         const ControlInputs& inputs = touchControls.getInputs();
 
         // Instant local prediction for aim angle and facing (0ms latency response)
@@ -871,16 +917,16 @@ int main(int argc, char* argv[]) {
         if (localPlayer) {
             Vector2 targetPos = {localPlayer->renderX, localPlayer->renderY};
             camera.target = Vector2Lerp(camera.target, targetPos, 0.12f);
-            camera.offset = {curWidth * 0.5f, curHeight * 0.5f};
+            camera.offset = {virtualWidth * 0.5f, virtualHeight * 0.5f};
         }
 
         // Update GameWorld particles, interpolations, and animations
         world.update(dt, localId);
 
         // -------------------------------------------------------------
-        // Render Pipeline
+        // Render Pipeline (Into Virtual RenderTexture)
         // -------------------------------------------------------------
-        BeginDrawing();
+        BeginTextureMode(virtualTarget);
         ClearBackground(Color{7, 10, 24, 255});
 
         // 1. World Layer (Space map, platforms, core, soldiers, bullets, explosions)
@@ -889,7 +935,7 @@ int main(int argc, char* argv[]) {
         // 2. HUD Layer (Health bar, fuel bar, weapon ammo, timer, room code, kill feed)
         HUDClickResult hudClicks = renderer.renderHUD(world, localId, network.getRoomCode(),
                                                      network.getPingMs(), audio.isMuted(),
-                                                     curWidth, curHeight);
+                                                     virtualWidth, virtualHeight);
         if (hudClicks.leaveClicked) {
             audio.playClick();
             network.leaveRoom();
@@ -917,12 +963,21 @@ int main(int argc, char* argv[]) {
         }
 
         // 3. Virtual Mobile Touch Controls Overlay
-        touchControls.draw(curWidth, curHeight);
+        touchControls.draw(virtualWidth, virtualHeight);
 
+        EndTextureMode();
+
+        // 4. Blit upscaled virtual RenderTexture to physical screen with bilinear filtering
+        BeginDrawing();
+        ClearBackground(BLACK);
+        Rectangle srcRec = { 0.0f, 0.0f, (float)virtualTarget.texture.width, -(float)virtualTarget.texture.height };
+        Rectangle dstRec = { offsetX, offsetY, renderW, renderH };
+        DrawTexturePro(virtualTarget.texture, srcRec, dstRec, { 0.0f, 0.0f }, 0.0f, WHITE);
         EndDrawing();
     }
 
     // Cleanup
+    UnloadRenderTexture(virtualTarget);
     for (int i = 0; i < 5; ++i) {
         if (avatarTextures[i].id != 0) {
             UnloadTexture(avatarTextures[i]);

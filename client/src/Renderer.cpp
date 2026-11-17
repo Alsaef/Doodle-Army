@@ -49,30 +49,40 @@ void Renderer::loadAssetTextures(const std::string& assetsPath) {
             std::string tryPaths[] = {
                 rel,
                 assetsPath + "/" + rel,
-                "client/assets/" + rel,
-                "assets/" + rel
+                "assets/" + rel,
+                "client/assets/" + rel
             };
 
             for (const auto& p : tryPaths) {
-                if (FileExists(p.c_str())) {
+                bool shouldTry = false;
+#if defined(__ANDROID__) || defined(PLATFORM_ANDROID)
+                shouldTry = true;
+#else
+                shouldTry = FileExists(p.c_str());
+#endif
+                if (shouldTry) {
                     Image img = LoadImage(p.c_str());
                     if (img.data != nullptr) {
                         ImageFormat(&img, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8);
                         Color* pixels = (Color*)img.data;
-                        int total = img.width * img.height;
-                        for (int px = 0; px < total; ++px) {
-                            if (pixels[px].r > 240 && pixels[px].g > 240 && pixels[px].b > 240) {
-                                pixels[px] = BLANK;
+                        if (pixels != nullptr) {
+                            int total = img.width * img.height;
+                            for (int px = 0; px < total; ++px) {
+                                if (pixels[px].r > 240 && pixels[px].g > 240 && pixels[px].b > 240) {
+                                    pixels[px] = BLANK;
+                                }
                             }
                         }
                         Texture2D tex = LoadTextureFromImage(img);
-                        SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
-                        textures[entry.key] = tex;
-                        textures[rel] = tex;
-                        textures["weapon_" + entry.key + ".png"] = tex;
                         UnloadImage(img);
-                        loaded = true;
-                        break;
+                        if (tex.id > 0) {
+                            SetTextureFilter(tex, TEXTURE_FILTER_BILINEAR);
+                            textures[entry.key] = tex;
+                            textures[rel] = tex;
+                            textures["weapon_" + entry.key + ".png"] = tex;
+                            loaded = true;
+                            break;
+                        }
                     }
                 }
             }

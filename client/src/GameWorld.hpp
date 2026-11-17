@@ -130,6 +130,41 @@ struct ExplosionEffect {
     float timer;
 };
 
+struct NetPlayerSnapshot {
+    std::string id;
+    std::string name = "Soldier";
+    std::string avatarStyle = "soldier";
+    bool isBot = false;
+    float x = 1200.0f;
+    float y = 800.0f;
+    float vx = 0.0f;
+    float vy = 0.0f;
+    float aimAngle = 0.0f;
+    int facing = 1;
+    int health = 100;
+    int fuel = 100;
+    std::string weapon = "RIFLE";
+    int ammo = 30;
+    int maxAmmo = 30;
+    int grenades = 2;
+    bool isDead = false;
+    bool isFlying = false;
+    bool isOnGround = false;
+    bool reloading = false;
+    int kills = 0;
+    int deaths = 0;
+    int score = 0;
+    int ping = 0;
+};
+
+struct GameSnapshot {
+    int matchDuration = 0;
+    std::vector<NetPlayerSnapshot> players;
+    std::vector<BulletData> bullets;
+    std::vector<GrenadeData> grenades;
+    std::vector<PickupData> pickups;
+};
+
 class GameWorld {
 public:
     GameWorld();
@@ -139,7 +174,10 @@ public:
     void reset();
     void update(float dt, const std::string& localPlayerId);
 
-    // Snapshot update from server
+    // Fast, zero-allocation snapshot update
+    void applySnapshot(const GameSnapshot& snap);
+
+    // Legacy JSON snapshot update from server
     void updateFromSnapshot(const void* jsonDoc); // Takes nlohmann::json pointer
     void addKillFeed(const std::string& killer, const std::string& victim, const std::string& weapon);
     void addHitImpact(float x, float y, int damage, bool isHeadshot);

@@ -82,6 +82,12 @@ void GameWorld::initDefaultMap() {
     platforms.push_back({"crate-5", 1170, 220, 58, 58, "crate", 0.08f, "Crate 5"});
     platforms.push_back({"crate-6", 1680, 880, 64, 64, "crate", -0.05f, "Crate 6"});
     platforms.push_back({"crate-7", 650, 880, 64, 64, "crate", 0.09f, "Crate 7"});
+
+    particles.reserve(64);
+    damageTexts.reserve(16);
+    explosions.reserve(8);
+    bullets.reserve(64);
+    grenades.reserve(16);
 }
 
 void GameWorld::reset() {
@@ -151,6 +157,70 @@ static bool SafeBool(const json& j, const std::string& key, bool def = false) {
         }
     } catch (...) {}
     return def;
+}
+
+void GameWorld::applySnapshot(const GameSnapshot& snap) {
+    matchDuration = snap.matchDuration;
+
+    // 1. Players update
+    std::vector<std::string> incomingIds;
+    incomingIds.reserve(snap.players.size());
+
+    for (const auto& np : snap.players) {
+        incomingIds.push_back(np.id);
+        PlayerData& p = players[np.id];
+        p.id = np.id;
+        p.name = np.name;
+        p.avatarStyle = np.avatarStyle;
+        p.isBot = np.isBot;
+
+        p.vx = np.vx;
+        p.vy = np.vy;
+        p.aimAngle = np.aimAngle;
+        p.facing = np.facing;
+
+        if (!p.initialized) {
+            p.renderX = np.x;
+            p.renderY = np.y;
+            p.initialized = true;
+        }
+        p.x = np.x;
+        p.y = np.y;
+
+        p.health = np.health;
+        p.fuel = np.fuel;
+        p.weapon = np.weapon;
+        p.maxAmmo = np.maxAmmo;
+
+        if (np.ammo < p.ammo) {
+            p.muzzleFlashTimer = 0.08f;
+            p.recoilOffset = 5.0f;
+        }
+        p.ammo = np.ammo;
+        p.grenades = np.grenades;
+        p.isDead = np.isDead;
+        p.isFlying = np.isFlying;
+        p.isOnGround = np.isOnGround;
+        p.reloading = np.reloading;
+        p.kills = np.kills;
+        p.deaths = np.deaths;
+        p.score = np.score;
+        p.ping = np.ping;
+    }
+
+    // Clean up disconnected players
+    for (auto it = players.begin(); it != players.end();) {
+        if (std::find(incomingIds.begin(), incomingIds.end(), it->first) == incomingIds.end()) {
+            it = players.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    // Direct move / assignment
+    bullets = snap.bullets;
+    grenades = snap.grenades;
+    pickups = snap.pickups;
 }
 
 void GameWorld::updateFromSnapshot(const void* jsonDoc) {
@@ -320,8 +390,12 @@ void GameWorld::addExplosion(float x, float y, float radius) {
     spawnExplosionParticles({x, y}, radius);
 }
 
+static const size_t MAX_ACTIVE_PARTICLES = 60;
+
 void GameWorld::spawnJetpackParticles(Vector2 pos, int facing, float spread) {
-    for (int i = 0; i < 3; ++i) {
+    if (particles.size() >= MAX_ACTIVE_PARTICLES) return;
+    int count = (particles.size() + 2 > MAX_ACTIVE_PARTICLES) ? 1 : 2;
+    for (int i = 0; i < count; ++i) {
         Particle p;
         p.pos = pos;
         float angle = PI / 2.0f + (static_cast<float>(rand() % 100) / 100.0f - 0.5f) * spread;
@@ -334,8 +408,8 @@ void GameWorld::spawnJetpackParticles(Vector2 pos, int facing, float spread) {
         else if (choice == 1) p.color = Color{251, 146, 60, 255};
         else p.color = Color{249, 115, 22, 255};
 
-        p.size = 4.0f + static_cast<float>(rand() % 4);
-        p.life = 0.22f + static_cast<float>(rand() % 10) / 50.0f;
+        p.size = 3.5f + static_cast<float>(rand() % 3);
+        p.life = 0.18f + static_cast<float>(rand() % 10) / 60.0f;
         p.maxLife = p.life;
         p.type = PARTICLE_JETPACK;
         particles.push_back(p);
@@ -343,7 +417,9 @@ void GameWorld::spawnJetpackParticles(Vector2 pos, int facing, float spread) {
 }
 
 void GameWorld::spawnImpactSparks(Vector2 pos, Color col, int count) {
+    count = std::min(count, 4);
     for (int i = 0; i < count; ++i) {
+        if (particles.size() >= MAX_ACTIVE_PARTICLES) break;
         Particle p;
         p.pos = pos;
         float angle = static_cast<float>(rand() % 360) * DEG2RAD;
@@ -351,7 +427,7 @@ void GameWorld::spawnImpactSparks(Vector2 pos, Color col, int count) {
         p.vel = {cosf(angle) * speed, sinf(angle) * speed};
         p.color = col;
         p.size = 2.5f + static_cast<float>(rand() % 3);
-        p.life = 0.3f + static_cast<float>(rand() % 10) / 40.0f;
+        p.life = 0.25f + static_cast<float>(rand() % 10) / 50.0f;
         p.maxLife = p.life;
         p.type = PARTICLE_SPARK;
         particles.push_back(p);
@@ -359,11 +435,12 @@ void GameWorld::spawnImpactSparks(Vector2 pos, Color col, int count) {
 }
 
 void GameWorld::spawnExplosionParticles(Vector2 pos, float radius) {
-    for (int i = 0; i < 40; ++i) {
+    for (int i = 0; i < 12; ++i) {
+        if (particles.size() >= MAX_ACTIVE_PARTICLES) break;
         Particle p;
         p.pos = pos;
         float angle = static_cast<float>(rand() % 360) * DEG2RAD;
-        float speed = 60.0f + static_cast<float>(rand() % 320);
+        float speed = 60.0f + static_cast<float>(rand() % 240);
         p.vel = {cosf(angle) * speed, sinf(angle) * speed};
 
         int c = rand() % 4;
@@ -372,8 +449,8 @@ void GameWorld::spawnExplosionParticles(Vector2 pos, float radius) {
         else if (c == 2) p.color = Color{239, 68, 68, 255};
         else p.color = Color{100, 116, 139, 200}; // Smoke
 
-        p.size = 6.0f + static_cast<float>(rand() % 12);
-        p.life = 0.45f + static_cast<float>(rand() % 20) / 40.0f;
+        p.size = 5.0f + static_cast<float>(rand() % 8);
+        p.life = 0.35f + static_cast<float>(rand() % 15) / 50.0f;
         p.maxLife = p.life;
         p.type = (c == 3) ? PARTICLE_SMOKE : PARTICLE_EXPLOSION;
         particles.push_back(p);
@@ -429,12 +506,13 @@ void GameWorld::update(float dt, const std::string& localPlayerId) {
         g.fuse = std::max(0.0f, g.fuse - dt * 1000.0f);
     }
 
-    // 3. Update Particles
+    // 3. Update Particles (O(1) swap-and-pop)
     for (size_t i = 0; i < particles.size();) {
         Particle& p = particles[i];
         p.life -= dt;
         if (p.life <= 0.0f) {
-            particles.erase(particles.begin() + i);
+            particles[i] = particles.back();
+            particles.pop_back();
             continue;
         }
 
@@ -449,18 +527,19 @@ void GameWorld::update(float dt, const std::string& localPlayerId) {
         p.color.a = static_cast<unsigned char>(255 * alphaRatio);
 
         if (p.type == PARTICLE_SMOKE) {
-            p.size += dt * 8.0f; // Smoke expands
+            p.size += dt * 6.0f; // Smoke expands
         }
 
         ++i;
     }
 
-    // 4. Update Damage Texts
+    // 4. Update Damage Texts (O(1) swap-and-pop)
     for (size_t i = 0; i < damageTexts.size();) {
         DamageText& dtItem = damageTexts[i];
         dtItem.life -= dt;
         if (dtItem.life <= 0.0f) {
-            damageTexts.erase(damageTexts.begin() + i);
+            damageTexts[i] = damageTexts.back();
+            damageTexts.pop_back();
             continue;
         }
         dtItem.pos.y += dtItem.vy * dt;
@@ -470,12 +549,13 @@ void GameWorld::update(float dt, const std::string& localPlayerId) {
         ++i;
     }
 
-    // 5. Update Explosions
+    // 5. Update Explosions (O(1) swap-and-pop)
     for (size_t i = 0; i < explosions.size();) {
         ExplosionEffect& exp = explosions[i];
         exp.timer += dt;
         if (exp.timer >= exp.duration) {
-            explosions.erase(explosions.begin() + i);
+            explosions[i] = explosions.back();
+            explosions.pop_back();
             continue;
         }
         float progress = exp.timer / exp.duration;

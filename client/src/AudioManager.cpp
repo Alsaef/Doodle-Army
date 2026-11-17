@@ -15,7 +15,8 @@ void AudioManager::init(const std::string& assetsPath) {
 
     InitAudioDevice();
     if (!IsAudioDeviceReady()) {
-        std::cerr << "[AudioManager] Audio device failed to initialize." << std::endl;
+        std::cerr << "[AudioManager] Audio device not ready or unavailable. Running in silent mode." << std::endl;
+        initialized = false;
         return;
     }
 
@@ -27,39 +28,51 @@ void AudioManager::init(const std::string& assetsPath) {
     for (const char* key : soundKeys) {
         std::string fname = std::string(key) + ".wav";
         std::string candidatePaths[] = {
+            "audio/" + fname,
             assetsPath + "/audio/" + fname,
-            assetsPath + "/" + fname,
             "assets/audio/" + fname,
-            "client/assets/audio/" + fname,
-            "audio/" + fname
+            fname,
+            "client/assets/audio/" + fname
         };
 
-        std::string chosenPath = "";
+        Sound loadedSound = {0};
         for (const auto& path : candidatePaths) {
-            if (FileExists(path.c_str())) {
-                chosenPath = path;
-                break;
+            bool shouldTry = false;
+#if defined(__ANDROID__) || defined(PLATFORM_ANDROID)
+            shouldTry = true;
+#else
+            shouldTry = FileExists(path.c_str());
+#endif
+            if (shouldTry) {
+                loadedSound = LoadSound(path.c_str());
+                if (loadedSound.frameCount > 0) {
+                    break;
+                }
             }
         }
 
-        sounds[key] = loadOrSynthesize(chosenPath, key);
+        if (loadedSound.frameCount > 0) {
+            sounds[key] = loadedSound;
+        } else {
+            sounds[key] = synthesizeFallback(key);
+        }
     }
 
     // Set volumes matching studio specs
-    if (sounds.count("rifle")) SetSoundVolume(sounds["rifle"], 0.85f);
-    if (sounds.count("shotgun")) SetSoundVolume(sounds["shotgun"], 0.95f);
-    if (sounds.count("sniper")) SetSoundVolume(sounds["sniper"], 1.0f);
-    if (sounds.count("smg")) SetSoundVolume(sounds["smg"], 0.75f);
-    if (sounds.count("pistol")) SetSoundVolume(sounds["pistol"], 0.85f);
-    if (sounds.count("laser")) SetSoundVolume(sounds["laser"], 0.80f);
-    if (sounds.count("rocket")) SetSoundVolume(sounds["rocket"], 0.95f);
-    if (sounds.count("jetpack")) SetSoundVolume(sounds["jetpack"], 0.65f);
-    if (sounds.count("explosion")) SetSoundVolume(sounds["explosion"], 1.0f);
-    if (sounds.count("reload")) SetSoundVolume(sounds["reload"], 0.85f);
-    if (sounds.count("hit")) SetSoundVolume(sounds["hit"], 0.70f);
-    if (sounds.count("kill")) SetSoundVolume(sounds["kill"], 0.90f);
-    if (sounds.count("pickup")) SetSoundVolume(sounds["pickup"], 0.75f);
-    if (sounds.count("click")) SetSoundVolume(sounds["click"], 0.50f);
+    if (sounds.count("rifle") && sounds["rifle"].frameCount > 0) SetSoundVolume(sounds["rifle"], 0.85f);
+    if (sounds.count("shotgun") && sounds["shotgun"].frameCount > 0) SetSoundVolume(sounds["shotgun"], 0.95f);
+    if (sounds.count("sniper") && sounds["sniper"].frameCount > 0) SetSoundVolume(sounds["sniper"], 1.0f);
+    if (sounds.count("smg") && sounds["smg"].frameCount > 0) SetSoundVolume(sounds["smg"], 0.75f);
+    if (sounds.count("pistol") && sounds["pistol"].frameCount > 0) SetSoundVolume(sounds["pistol"], 0.85f);
+    if (sounds.count("laser") && sounds["laser"].frameCount > 0) SetSoundVolume(sounds["laser"], 0.80f);
+    if (sounds.count("rocket") && sounds["rocket"].frameCount > 0) SetSoundVolume(sounds["rocket"], 0.95f);
+    if (sounds.count("jetpack") && sounds["jetpack"].frameCount > 0) SetSoundVolume(sounds["jetpack"], 0.65f);
+    if (sounds.count("explosion") && sounds["explosion"].frameCount > 0) SetSoundVolume(sounds["explosion"], 1.0f);
+    if (sounds.count("reload") && sounds["reload"].frameCount > 0) SetSoundVolume(sounds["reload"], 0.85f);
+    if (sounds.count("hit") && sounds["hit"].frameCount > 0) SetSoundVolume(sounds["hit"], 0.70f);
+    if (sounds.count("kill") && sounds["kill"].frameCount > 0) SetSoundVolume(sounds["kill"], 0.90f);
+    if (sounds.count("pickup") && sounds["pickup"].frameCount > 0) SetSoundVolume(sounds["pickup"], 0.75f);
+    if (sounds.count("click") && sounds["click"].frameCount > 0) SetSoundVolume(sounds["click"], 0.50f);
 
     initialized = true;
     std::cout << "[AudioManager] Initialized audio with " << sounds.size() << " sound channels." << std::endl;
@@ -68,25 +81,32 @@ void AudioManager::init(const std::string& assetsPath) {
 void AudioManager::unload() {
     if (!initialized) return;
 
-    for (auto& pair : sounds) {
-        if (pair.second.frameCount > 0) {
-            StopSound(pair.second);
-            UnloadSound(pair.second);
-        }
-    }
-    sounds.clear();
-
     if (IsAudioDeviceReady()) {
+        for (auto& pair : sounds) {
+            if (pair.second.frameCount > 0) {
+                StopSound(pair.second);
+                UnloadSound(pair.second);
+            }
+        }
         CloseAudioDevice();
     }
+    sounds.clear();
     initialized = false;
 }
 
 Sound AudioManager::loadOrSynthesize(const std::string& path, const std::string& soundType) {
-    if (!path.empty() && FileExists(path.c_str())) {
-        Sound snd = LoadSound(path.c_str());
-        if (snd.frameCount > 0) {
-            return snd;
+    if (!path.empty()) {
+        bool shouldTry = false;
+#if defined(__ANDROID__) || defined(PLATFORM_ANDROID)
+        shouldTry = true;
+#else
+        shouldTry = FileExists(path.c_str());
+#endif
+        if (shouldTry) {
+            Sound snd = LoadSound(path.c_str());
+            if (snd.frameCount > 0) {
+                return snd;
+            }
         }
     }
     return synthesizeFallback(soundType);
@@ -174,7 +194,7 @@ Sound AudioManager::synthesizeFallback(const std::string& soundType) {
 }
 
 void AudioManager::playShoot(const std::string& weaponType) {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
 
     std::string key = "rifle";
     float minInterval = 0.12f;
@@ -204,7 +224,7 @@ void AudioManager::playShoot(const std::string& weaponType) {
 }
 
 void AudioManager::playHit() {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
 
     float now = static_cast<float>(GetTime());
     auto timeIt = lastPlayTimes.find("hit");
@@ -222,7 +242,7 @@ void AudioManager::playHit() {
 }
 
 void AudioManager::playExplosion() {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
     auto it = sounds.find("explosion");
     if (it != sounds.end() && it->second.frameCount > 0) {
         float pitch = 0.97f + static_cast<float>(rand() % 60) / 1000.0f;
@@ -232,49 +252,49 @@ void AudioManager::playExplosion() {
 }
 
 void AudioManager::playReload() {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
     auto it = sounds.find("reload");
-    if (it != sounds.end()) {
+    if (it != sounds.end() && it->second.frameCount > 0) {
         PlaySound(it->second);
     }
 }
 
 void AudioManager::playPickup() {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
     auto it = sounds.find("pickup");
-    if (it != sounds.end()) {
+    if (it != sounds.end() && it->second.frameCount > 0) {
         PlaySound(it->second);
     }
 }
 
 void AudioManager::playKill() {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
     auto it = sounds.find("kill");
-    if (it != sounds.end()) {
+    if (it != sounds.end() && it->second.frameCount > 0) {
         PlaySound(it->second);
     }
 }
 
 void AudioManager::playClick() {
-    if (muted || !initialized) return;
+    if (muted || !initialized || !IsAudioDeviceReady()) return;
     auto it = sounds.find("click");
-    if (it != sounds.end()) {
+    if (it != sounds.end() && it->second.frameCount > 0) {
         PlaySound(it->second);
     }
 }
 
 void AudioManager::updateJetpack(bool isFlying) {
-    if (muted || !initialized) {
+    if (muted || !initialized || !IsAudioDeviceReady()) {
         if (jetpackPlaying) {
             auto it = sounds.find("jetpack");
-            if (it != sounds.end()) StopSound(it->second);
+            if (it != sounds.end() && it->second.frameCount > 0 && IsAudioDeviceReady()) StopSound(it->second);
             jetpackPlaying = false;
         }
         return;
     }
 
     auto it = sounds.find("jetpack");
-    if (it == sounds.end()) return;
+    if (it == sounds.end() || it->second.frameCount == 0) return;
 
     if (isFlying) {
         if (!jetpackPlaying || !IsSoundPlaying(it->second)) {
@@ -293,7 +313,7 @@ void AudioManager::setMuted(bool newMuted) {
     muted = newMuted;
     if (muted && jetpackPlaying) {
         auto it = sounds.find("jetpack");
-        if (it != sounds.end()) StopSound(it->second);
+        if (it != sounds.end() && it->second.frameCount > 0 && IsAudioDeviceReady()) StopSound(it->second);
         jetpackPlaying = false;
     }
 }

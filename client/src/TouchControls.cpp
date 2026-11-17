@@ -73,7 +73,7 @@ void TouchControls::reset() {
     grenadePressed = false;
 }
 
-void TouchControls::update(int screenWidth, int screenHeight, Vector2 playerScreenPos) {
+void TouchControls::update(int screenWidth, int screenHeight, Vector2 playerScreenPos, float offsetX, float offsetY, float scale) {
     // Re-adjust centers if screen size changed
     init(screenWidth, screenHeight);
 
@@ -101,7 +101,12 @@ void TouchControls::update(int screenWidth, int screenHeight, Vector2 playerScre
 
     // Process multi-touch points
     for (int i = 0; i < touchCount; ++i) {
-        Vector2 touchPos = GetTouchPosition(i);
+        Vector2 rawPos = GetTouchPosition(i);
+        Vector2 touchPos = rawPos;
+        if (scale > 0.0f) {
+            touchPos.x = (rawPos.x - offsetX) / scale;
+            touchPos.y = (rawPos.y - offsetY) / scale;
+        }
         int touchId = GetTouchPointId(i);
 
         // 1. Check Reload button touch
@@ -222,7 +227,12 @@ void TouchControls::update(int screenWidth, int screenHeight, Vector2 playerScre
         }
 
         // Aiming with Mouse
-        Vector2 mousePos = GetMousePosition();
+        Vector2 rawMouse = GetMousePosition();
+        Vector2 mousePos = rawMouse;
+        if (scale > 0.0f) {
+            mousePos.x = (rawMouse.x - offsetX) / scale;
+            mousePos.y = (rawMouse.y - offsetY) / scale;
+        }
         Vector2 aimDiff = Vector2Subtract(mousePos, playerScreenPos);
         inputs.aimAngle = atan2f(aimDiff.y, aimDiff.x);
 
