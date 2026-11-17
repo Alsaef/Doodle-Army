@@ -65,6 +65,7 @@ set(SOURCE_FILES
     src/NetworkManager.cpp
     src/GameWorld.cpp
     src/Renderer.cpp
+    src/AudioManager.cpp
 )
 
 add_executable(MiniMilitiaNative ${SOURCE_FILES})

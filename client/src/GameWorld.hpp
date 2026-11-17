@@ -49,6 +49,7 @@ struct PlayerData {
     // Client smooth rendered coordinates (interpolated)
     float renderX = 1200.0f;
     float renderY = 800.0f;
+    bool initialized = false;
     float aimAngle = 0.0f;
     int facing = 1; // 1 = right, -1 = left
 
@@ -56,6 +57,7 @@ struct PlayerData {
     int fuel = 100;
     std::string weapon = "RIFLE";
     int ammo = 30;
+    int maxAmmo = 30;
     int grenades = 2;
 
     bool isDead = false;
@@ -68,13 +70,15 @@ struct PlayerData {
     int score = 0;
     int ping = 0;
 
-    // Animation timer
+    // Animation & Visual Timers
     float walkCycle = 0.0f;
     float jetpackFlicker = 0.0f;
+    float muzzleFlashTimer = 0.0f;
+    float recoilOffset = 0.0f;
 };
 
 struct BulletData {
-    int id = 0;
+    std::string id = "";
     float x = 0.0f;
     float y = 0.0f;
     float vx = 0.0f;
@@ -85,7 +89,7 @@ struct BulletData {
 };
 
 struct GrenadeData {
-    int id = 0;
+    std::string id = "";
     float x = 0.0f;
     float y = 0.0f;
     float fuse = 2500.0f;
@@ -132,6 +136,7 @@ public:
     ~GameWorld() = default;
 
     void initDefaultMap();
+    void reset();
     void update(float dt, const std::string& localPlayerId);
 
     // Snapshot update from server
@@ -156,6 +161,7 @@ public:
     const std::vector<Particle>& getParticles() const { return particles; }
     const std::vector<ExplosionEffect>& getExplosions() const { return explosions; }
 
+    PlayerData* getLocalPlayer(const std::string& localPlayerId);
     const PlayerData* getLocalPlayer(const std::string& localPlayerId) const;
     int getMatchDuration() const { return matchDuration; }
     float getMapWidth() const { return mapWidth; }

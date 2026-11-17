@@ -84,6 +84,25 @@ void GameWorld::initDefaultMap() {
     platforms.push_back({"crate-7", 650, 880, 64, 64, "crate", 0.09f, "Crate 7"});
 }
 
+void GameWorld::reset() {
+    players.clear();
+    bullets.clear();
+    grenades.clear();
+    particles.clear();
+    explosions.clear();
+    damageTexts.clear();
+    killFeed.clear();
+    matchDuration = 0;
+}
+
+PlayerData* GameWorld::getLocalPlayer(const std::string& localPlayerId) {
+    auto it = players.find(localPlayerId);
+    if (it != players.end()) {
+        return &it->second;
+    }
+    return nullptr;
+}
+
 const PlayerData* GameWorld::getLocalPlayer(const std::string& localPlayerId) const {
     auto it = players.find(localPlayerId);
     if (it != players.end()) {
@@ -93,18 +112,58 @@ const PlayerData* GameWorld::getLocalPlayer(const std::string& localPlayerId) co
 }
 
 #if defined(NLOHMANN_JSON_VERSION_MAJOR) || defined(INCLUDE_NLOHMANN_JSON_HPP_)
+static float SafeFloat(const json& j, const std::string& key, float def = 0.0f) {
+    if (!j.contains(key) || j[key].is_null()) return def;
+    try {
+        if (j[key].is_number()) return j[key].get<float>();
+        if (j[key].is_string()) return std::stof(j[key].get<std::string>());
+    } catch (...) {}
+    return def;
+}
+
+static int SafeInt(const json& j, const std::string& key, int def = 0) {
+    if (!j.contains(key) || j[key].is_null()) return def;
+    try {
+        if (j[key].is_number()) return j[key].get<int>();
+        if (j[key].is_string()) return std::stoi(j[key].get<std::string>());
+        if (j[key].is_boolean()) return j[key].get<bool>() ? 1 : 0;
+    } catch (...) {}
+    return def;
+}
+
+static std::string SafeString(const json& j, const std::string& key, const std::string& def = "") {
+    if (!j.contains(key) || j[key].is_null()) return def;
+    try {
+        if (j[key].is_string()) return j[key].get<std::string>();
+        if (j[key].is_number()) return std::to_string(j[key].get<int>());
+    } catch (...) {}
+    return def;
+}
+
+static bool SafeBool(const json& j, const std::string& key, bool def = false) {
+    if (!j.contains(key) || j[key].is_null()) return def;
+    try {
+        if (j[key].is_boolean()) return j[key].get<bool>();
+        if (j[key].is_number()) return j[key].get<int>() != 0;
+        if (j[key].is_string()) {
+            std::string s = j[key].get<std::string>();
+            return (s == "true" || s == "1" || s == "TRUE");
+        }
+    } catch (...) {}
+    return def;
+}
+
 void GameWorld::updateFromSnapshot(const void* jsonDoc) {
     if (!jsonDoc) return;
     const json& j = *reinterpret_cast<const json*>(jsonDoc);
 
-    if (j.contains("matchDuration") && j["matchDuration"].is_number()) {
-        matchDuration = j["matchDuration"].get<int>();
+    if (j.contains("matchDuration")) {
+        matchDuration = SafeInt(j, "matchDuration", matchDuration);
     }
 
     // 1. Update Players
     if (j.contains("players") && j["players"].is_object()) {
         const auto& playersObj = j["players"];
-        // Mark players for cleanup
         std::vector<std::string> incomingIds;
 
         for (auto it = playersObj.begin(); it != playersObj.end(); ++it) {
@@ -114,38 +173,55 @@ void GameWorld::updateFromSnapshot(const void* jsonDoc) {
 
             PlayerData& p = players[pId];
             p.id = pId;
-            if (pData.contains("name")) p.name = pData["name"].get<std::string>();
-            if (pData.contains("avatarStyle")) p.avatarStyle = pData["avatarStyle"].get<std::string>();
-            if (pData.contains("isBot")) p.isBot = pData["isBot"].get<bool>();
+            p.name = SafeString(pData, "name", p.name);
+            p.avatarStyle = SafeString(pData, "avatarStyle", p.avatarStyle);
+            p.isBot = SafeBool(pData, "isBot", p.isBot);
 
-            float sx = pData.value("x", p.x);
-            float sy = pData.value("y", p.y);
-            p.vx = pData.value("vx", p.vx);
-            p.vy = pData.value("vy", p.vy);
-            p.aimAngle = pData.value("aimAngle", p.aimAngle);
-            p.facing = pData.value("facing", p.facing);
+            float sx = SafeFloat(pData, "x", p.x);
+            float sy = SafeFloat(pData, "y", p.y);
+            p.vx = SafeFloat(pData, "vx", p.vx);
+            p.vy = SafeFloat(pData, "vy", p.vy);
+            p.aimAngle = SafeFloat(pData, "aimAngle", p.aimAngle);
+            p.facing = SafeInt(pData, "facing", p.facing);
 
-            // First time spawn: snap directly
-            if (p.renderX == 0.0f && p.renderY == 0.0f) {
+            // First time spawn: snap directly to spawn coordinates
+            if (!p.initialized) {
                 p.renderX = sx;
                 p.renderY = sy;
+                p.initialized = true;
             }
             p.x = sx;
             p.y = sy;
 
-            p.health = pData.value("health", p.health);
-            p.fuel = pData.value("fuel", p.fuel);
-            p.weapon = pData.value("weapon", p.weapon);
-            p.ammo = pData.value("ammo", p.ammo);
-            p.grenades = pData.value("grenades", p.grenades);
-            p.isDead = pData.value("isDead", p.isDead);
-            p.isFlying = pData.value("isFlying", p.isFlying);
-            p.isOnGround = pData.value("isOnGround", p.isOnGround);
-            p.reloading = pData.value("reloading", p.reloading);
-            p.kills = pData.value("kills", p.kills);
-            p.deaths = pData.value("deaths", p.deaths);
-            p.score = pData.value("score", p.score);
-            p.ping = pData.value("ping", p.ping);
+            p.health = SafeInt(pData, "health", p.health);
+            p.fuel = SafeInt(pData, "fuel", p.fuel);
+            p.weapon = SafeString(pData, "weapon", p.weapon);
+
+            // Calculate max ammo for weapon type
+            if (p.weapon == "SMG") p.maxAmmo = 36;
+            else if (p.weapon == "SHOTGUN") p.maxAmmo = 6;
+            else if (p.weapon == "SNIPER") p.maxAmmo = 5;
+            else if (p.weapon == "PISTOL") p.maxAmmo = 12;
+            else if (p.weapon == "LASER") p.maxAmmo = 14;
+            else if (p.weapon == "ROCKET") p.maxAmmo = 4;
+            else p.maxAmmo = 30; // RIFLE
+
+            int newAmmo = SafeInt(pData, "ammo", p.ammo);
+            if (newAmmo < p.ammo) {
+                p.muzzleFlashTimer = 0.08f;
+                p.recoilOffset = 5.0f;
+            }
+            p.ammo = newAmmo;
+
+            p.grenades = SafeInt(pData, "grenades", p.grenades);
+            p.isDead = SafeBool(pData, "isDead", p.isDead);
+            p.isFlying = SafeBool(pData, "isFlying", p.isFlying);
+            p.isOnGround = SafeBool(pData, "isOnGround", p.isOnGround);
+            p.reloading = SafeBool(pData, "reloading", p.reloading);
+            p.kills = SafeInt(pData, "kills", p.kills);
+            p.deaths = SafeInt(pData, "deaths", p.deaths);
+            p.score = SafeInt(pData, "score", p.score);
+            p.ping = SafeInt(pData, "ping", p.ping);
         }
 
         // Clean up disconnected players
@@ -163,14 +239,14 @@ void GameWorld::updateFromSnapshot(const void* jsonDoc) {
     if (j.contains("bullets") && j["bullets"].is_array()) {
         for (const auto& bJson : j["bullets"]) {
             BulletData b;
-            b.id = bJson.value("id", 0);
-            b.x = bJson.value("x", 0.0f);
-            b.y = bJson.value("y", 0.0f);
-            b.vx = bJson.value("vx", 0.0f);
-            b.vy = bJson.value("vy", 0.0f);
-            b.color = bJson.value("color", "#fb923c");
-            b.length = bJson.value("length", 22.0f);
-            b.weaponType = bJson.value("weaponType", "RIFLE");
+            b.id = SafeString(bJson, "id", "");
+            b.x = SafeFloat(bJson, "x", 0.0f);
+            b.y = SafeFloat(bJson, "y", 0.0f);
+            b.vx = SafeFloat(bJson, "vx", 0.0f);
+            b.vy = SafeFloat(bJson, "vy", 0.0f);
+            b.color = SafeString(bJson, "color", "#fb923c");
+            b.length = SafeFloat(bJson, "length", 22.0f);
+            b.weaponType = SafeString(bJson, "weaponType", "RIFLE");
             bullets.push_back(b);
         }
     }
@@ -180,10 +256,10 @@ void GameWorld::updateFromSnapshot(const void* jsonDoc) {
     if (j.contains("grenades") && j["grenades"].is_array()) {
         for (const auto& gJson : j["grenades"]) {
             GrenadeData g;
-            g.id = gJson.value("id", 0);
-            g.x = gJson.value("x", 0.0f);
-            g.y = gJson.value("y", 0.0f);
-            g.fuse = gJson.value("fuse", 2500.0f);
+            g.id = SafeString(gJson, "id", "");
+            g.x = SafeFloat(gJson, "x", 0.0f);
+            g.y = SafeFloat(gJson, "y", 0.0f);
+            g.fuse = SafeFloat(gJson, "fuse", 2500.0f);
             grenades.push_back(g);
         }
     }
@@ -193,11 +269,11 @@ void GameWorld::updateFromSnapshot(const void* jsonDoc) {
     if (j.contains("pickups") && j["pickups"].is_array()) {
         for (const auto& pJson : j["pickups"]) {
             PickupData p;
-            p.id = pJson.value("id", "");
-            p.type = pJson.value("type", "HEALTH");
-            p.x = pJson.value("x", 0.0f);
-            p.y = pJson.value("y", 0.0f);
-            p.active = pJson.value("active", true);
+            p.id = SafeString(pJson, "id", "");
+            p.type = SafeString(pJson, "type", "HEALTH");
+            p.x = SafeFloat(pJson, "x", 0.0f);
+            p.y = SafeFloat(pJson, "y", 0.0f);
+            p.active = SafeBool(pJson, "active", true);
             pickups.push_back(p);
         }
     }
@@ -323,6 +399,10 @@ void GameWorld::update(float dt, const std::string& localPlayerId) {
         p.renderX = Lerp(p.renderX, p.x, 0.28f);
         p.renderY = Lerp(p.renderY, p.y, 0.28f);
 
+        // Weapon recoil and muzzle flash decay
+        p.muzzleFlashTimer = std::max(0.0f, p.muzzleFlashTimer - dt);
+        p.recoilOffset = Lerp(p.recoilOffset, 0.0f, 0.25f);
+
         // Walk cycle animation
         if (fabsf(p.vx) > 10.0f && p.isOnGround) {
             p.walkCycle += dt * 12.0f;
@@ -338,6 +418,15 @@ void GameWorld::update(float dt, const std::string& localPlayerId) {
             };
             spawnJetpackParticles(jetpackNozzle, p.facing);
         }
+    }
+
+    // 2b. Smooth Bullet & Grenade Simulation between network snapshots
+    for (auto& b : bullets) {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+    }
+    for (auto& g : grenades) {
+        g.fuse = std::max(0.0f, g.fuse - dt * 1000.0f);
     }
 
     // 3. Update Particles

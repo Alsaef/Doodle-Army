@@ -3,6 +3,7 @@
 #include <string>
 #include <functional>
 #include <deque>
+#include <vector>
 #include <mutex>
 #include <memory>
 
@@ -27,17 +28,18 @@ public:
     bool isConnected() const { return connected; }
     const std::string& getLocalPlayerId() const { return localPlayerId; }
     const std::string& getRoomCode() const { return roomCode; }
+    const std::string& getCurrentUrl() const { return currentUrl; }
     bool isHost() const { return hostStatus; }
     int getPingMs() const { return pingMs; }
 
     // Call on main loop each frame to dispatch incoming WebSocket events
     void pollMessages();
 
-    // Outgoing packets
+    // Outgoing packets (Matching client_web structure exactly)
     void createRoom(const std::string& name, const std::string& avatarStyle, int botCount = 0);
     void joinRoom(const std::string& roomCode, const std::string& name, const std::string& avatarStyle);
     void quickPlay(const std::string& name, const std::string& avatarStyle);
-    void sendInput(bool left, bool right, bool up, bool jump, float aimAngle);
+    void sendInput(bool left, bool right, bool up, bool jump, float aimAngle, bool reload = false);
     void sendShoot(float aimAngle);
     void sendGrenade(float aimAngle);
     void sendReload();
@@ -60,8 +62,27 @@ public:
 private:
     void sendJson(const std::string& type, const void* payloadJson);
     void handleRawMessage(const std::string& message);
+    void flushPendingMessages();
+
+    enum PendingIntent {
+        INTENT_NONE = 0,
+        INTENT_CREATE_ROOM,
+        INTENT_JOIN_ROOM,
+        INTENT_QUICK_PLAY
+    };
+
+    struct PendingRoomRequest {
+        PendingIntent intent = INTENT_NONE;
+        std::string name = "Soldier";
+        std::string avatarStyle = "soldier";
+        std::string roomCode = "";
+        int botCount = 0;
+    };
+
+    PendingRoomRequest pendingRequest;
 
     bool connected = false;
+    std::string currentUrl;
     std::string localPlayerId;
     std::string roomCode;
     bool hostStatus = false;
@@ -70,6 +91,7 @@ private:
 
     std::mutex queueMutex;
     std::deque<std::string> incomingQueue;
+    std::vector<std::string> pendingOutgoingQueue;
 
 #ifdef HAS_IXWEBSOCKET
     std::unique_ptr<ix::WebSocket> webSocket;

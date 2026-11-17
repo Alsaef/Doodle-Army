@@ -191,6 +191,15 @@ void TouchControls::update(int screenWidth, int screenHeight, Vector2 playerScre
         rightStickCurrent = Vector2Lerp(rightStickCurrent, rightStickCenter, 0.35f);
     }
 
+    // Auto-face movement direction on mobile when not actively aiming with right joystick
+    if ((mobileDetected || forceMobile) && !rightStickActive) {
+        if (inputs.moveX < -0.2f) {
+            inputs.aimAngle = PI;
+        } else if (inputs.moveX > 0.2f) {
+            inputs.aimAngle = 0.0f;
+        }
+    }
+
     // ==========================================
     // Desktop Keyboard & Mouse Fallback
     // ==========================================

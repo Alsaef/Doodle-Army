@@ -38,9 +38,14 @@ NetworkManager::~NetworkManager() {
 }
 
 void NetworkManager::connect(const std::string& url) {
-    disconnect();
-
 #if defined(HAS_IXWEBSOCKET)
+    if (connected && currentUrl == url && webSocket && webSocket->getReadyState() == ix::ReadyState::Open) {
+        return;
+    }
+
+    disconnect();
+    currentUrl = url;
+
     if (!webSocket) {
         webSocket = std::make_unique<ix::WebSocket>();
     }
@@ -48,13 +53,9 @@ void NetworkManager::connect(const std::string& url) {
     // Configure TLS options for secure WebSockets (wss://) on Render
     if (url.rfind("wss://", 0) == 0) {
         ix::SocketTLSOptions tlsOptions;
-#if defined(__ANDROID__) || defined(PLATFORM_ANDROID)
-        // Android NDK doesn't have standard /etc/ssl CA bundle; disable local file check
+        // Disable strict root CA verification so secure WebSockets connect cleanly
+        // on both Linux systems without local ca-certificates bundles and Android NDK
         tlsOptions.caFile = "NONE";
-#else
-        // Desktop Linux / Windows uses system CA bundle
-        tlsOptions.caFile = "SYSTEM";
-#endif
         webSocket->setTLSOptions(tlsOptions);
     }
 
@@ -65,20 +66,27 @@ void NetworkManager::connect(const std::string& url) {
 
     webSocket->setOnMessageCallback([this](const ix::WebSocketMessagePtr& msg) {
         if (msg->type == ix::WebSocketMessageType::Open) {
-            std::lock_guard<std::mutex> lock(queueMutex);
-            incomingQueue.push_back("{\"__event__\":\"open\"}");
+            {
+                std::lock_guard<std::mutex> lock(queueMutex);
+                connected = true;
+                incomingQueue.push_back("{\"__event__\":\"open\"}");
+            }
+            flushPendingMessages();
         } else if (msg->type == ix::WebSocketMessageType::Close) {
             std::lock_guard<std::mutex> lock(queueMutex);
+            connected = false;
             incomingQueue.push_back("{\"__event__\":\"close\"}");
         } else if (msg->type == ix::WebSocketMessageType::Message) {
             std::lock_guard<std::mutex> lock(queueMutex);
             incomingQueue.push_back(msg->str);
         } else if (msg->type == ix::WebSocketMessageType::Error) {
             std::lock_guard<std::mutex> lock(queueMutex);
+            connected = false;
             incomingQueue.push_back("{\"__event__\":\"error\",\"message\":\"" + msg->errorInfo.reason + "\"}");
         }
     });
 
+    std::cout << "[NetworkManager] Starting connection to: " << url << std::endl;
     webSocket->start();
 #else
     std::cout << "[NetworkManager] Connecting to: " << url << std::endl;
@@ -95,8 +103,23 @@ void NetworkManager::disconnect() {
     connected = false;
     roomCode.clear();
     localPlayerId.clear();
+    pendingRequest.intent = INTENT_NONE;
     std::lock_guard<std::mutex> lock(queueMutex);
     incomingQueue.clear();
+    pendingOutgoingQueue.clear();
+}
+
+void NetworkManager::flushPendingMessages() {
+#if defined(HAS_IXWEBSOCKET)
+    std::lock_guard<std::mutex> lock(queueMutex);
+    if (webSocket && webSocket->getReadyState() == ix::ReadyState::Open) {
+        for (const auto& msg : pendingOutgoingQueue) {
+            std::cout << "[WS Flush Queued]: " << msg.substr(0, 50) << std::endl;
+            webSocket->send(msg);
+        }
+        pendingOutgoingQueue.clear();
+    }
+#endif
 }
 
 void NetworkManager::pollMessages() {
@@ -121,7 +144,8 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
             std::string ev = j["__event__"].get<std::string>();
             if (ev == "open") {
                 connected = true;
-                std::cout << "[WS] Connected successfully!" << std::endl;
+                std::cout << "[WS] Connected successfully to server!" << std::endl;
+                flushPendingMessages();
             } else if (ev == "close") {
                 connected = false;
                 std::cout << "[WS] Disconnected from server." << std::endl;
@@ -140,43 +164,90 @@ void NetworkManager::handleRawMessage(const std::string& raw) {
         std::string type = j["type"].get<std::string>();
         const auto& payload = j.contains("payload") ? j["payload"] : json::object();
 
-        if (type == "welcome") {
+        // 1. Welcome handshake
+        if (type == "welcome" || type == "WELCOME") {
             localPlayerId = payload.value("clientId", "");
+            flushPendingMessages();
+
+            // Automatically execute pending room action if queued while connecting
+            if (pendingRequest.intent == INTENT_CREATE_ROOM) {
+                json p;
+                p["name"] = pendingRequest.name;
+                p["avatarStyle"] = pendingRequest.avatarStyle;
+                p["botCount"] = pendingRequest.botCount;
+                sendJson("create_room", &p);
+            } else if (pendingRequest.intent == INTENT_JOIN_ROOM) {
+                json p;
+                p["roomCode"] = pendingRequest.roomCode;
+                p["name"] = pendingRequest.name;
+                p["avatarStyle"] = pendingRequest.avatarStyle;
+                sendJson("join_room", &p);
+            } else if (pendingRequest.intent == INTENT_QUICK_PLAY) {
+                json p;
+                p["name"] = pendingRequest.name;
+                p["avatarStyle"] = pendingRequest.avatarStyle;
+                sendJson("quick_play", &p);
+            }
+
             if (onWelcomeCb) onWelcomeCb(localPlayerId);
-        } else if (type == "room_created") {
-            roomCode = payload.value("roomCode", "");
-            localPlayerId = payload.value("playerId", "");
+        }
+        // 2. Room created (immediate in-game transition)
+        else if (type == "room_created" || type == "ROOM_CREATED") {
+            pendingRequest.intent = INTENT_NONE; // Room successfully created!
+            roomCode = payload.value("roomCode", payload.value("code", ""));
+            localPlayerId = payload.value("playerId", payload.value("clientId", localPlayerId));
+            if (localPlayerId.empty() && payload.contains("player") && payload["player"].contains("id")) {
+                localPlayerId = payload["player"]["id"].get<std::string>();
+            }
             hostStatus = payload.value("isHost", true);
             if (onRoomCreatedCb) onRoomCreatedCb(roomCode, localPlayerId, hostStatus);
-        } else if (type == "room_joined") {
-            roomCode = payload.value("roomCode", "");
-            localPlayerId = payload.value("playerId", "");
+        }
+        // 3. Room joined or Game Start (immediate in-game transition)
+        else if (type == "room_joined" || type == "ROOM_JOINED" || type == "game_start" || type == "GAME_START") {
+            pendingRequest.intent = INTENT_NONE; // Room successfully joined!
+            roomCode = payload.value("roomCode", payload.value("code", roomCode));
+            localPlayerId = payload.value("playerId", payload.value("clientId", localPlayerId));
+            if (localPlayerId.empty() && payload.contains("player") && payload["player"].contains("id")) {
+                localPlayerId = payload["player"]["id"].get<std::string>();
+            }
             hostStatus = payload.value("isHost", false);
             if (onRoomJoinedCb) onRoomJoinedCb(roomCode, localPlayerId, hostStatus);
-        } else if (type == "game_state") {
+        }
+        // 4. Live 30Hz Game State Snapshots
+        else if (type == "game_state" || type == "GAME_STATE" || type == "state_update" || type == "STATE_UPDATE") {
             if (onGameStateCb) onGameStateCb(&payload);
-        } else if (type == "kill_feed") {
+        }
+        // 5. Kill feed notifications
+        else if (type == "kill_feed" || type == "KILL_FEED") {
             std::string killer = payload.value("killerName", "Soldier");
             std::string victim = payload.value("victimName", "Enemy");
             std::string weapon = payload.value("weapon", "RIFLE");
             if (onKillFeedCb) onKillFeedCb(killer, victim, weapon);
-        } else if (type == "hit_impact") {
+        }
+        // 6. Combat hit sparks & damage numbers
+        else if (type == "hit_impact" || type == "HIT_IMPACT") {
             float x = payload.value("x", 0.0f);
             float y = payload.value("y", 0.0f);
             int damage = payload.value("damage", 10);
             bool headshot = payload.value("headshot", false);
             if (onHitImpactCb) onHitImpactCb(x, y, damage, headshot);
-        } else if (type == "explosion") {
+        }
+        // 7. Grenade explosions
+        else if (type == "explosion" || type == "EXPLOSION") {
             float x = payload.value("x", 0.0f);
             float y = payload.value("y", 0.0f);
             float radius = payload.value("radius", 130.0f);
             if (onExplosionCb) onExplosionCb(x, y, radius);
-        } else if (type == "pong") {
-            uint64_t sent = payload.value("clientTime", 0ULL);
+        }
+        // 8. Heartbeat pong latency response
+        else if (type == "pong" || type == "PONG") {
+            uint64_t sent = payload.value("timestamp", payload.value("clientTime", 0ULL));
             if (sent > 0) {
                 pingMs = static_cast<int>(GetCurrentTimeMs() - sent);
             }
-        } else if (type == "error") {
+        }
+        // 9. Error response
+        else if (type == "error" || type == "ERROR") {
             std::string msg = payload.value("message", "Unknown error");
             if (onErrorCb) onErrorCb(msg);
         }
@@ -198,14 +269,26 @@ void NetworkManager::sendJson(const std::string& type, const void* payloadJson) 
     std::string text = packet.dump();
 
 #if defined(HAS_IXWEBSOCKET)
-    if (webSocket) {
+    if (webSocket && webSocket->getReadyState() == ix::ReadyState::Open) {
         webSocket->send(text);
+    } else {
+        std::lock_guard<std::mutex> lock(queueMutex);
+        pendingOutgoingQueue.push_back(text);
+        std::cout << "[WS Queued]: " << type << " (waiting for socket open)" << std::endl;
     }
 #endif
 #endif
 }
 
+// -------------------------------------------------------------------------
+// Outgoing Packets (Matches client_web JSON structure exactly)
+// -------------------------------------------------------------------------
+
 void NetworkManager::createRoom(const std::string& name, const std::string& avatarStyle, int botCount) {
+    pendingRequest.intent = INTENT_CREATE_ROOM;
+    pendingRequest.name = name;
+    pendingRequest.avatarStyle = avatarStyle;
+    pendingRequest.botCount = botCount;
 #if defined(NLOHMANN_JSON_VERSION_MAJOR) || defined(INCLUDE_NLOHMANN_JSON_HPP_)
     json p;
     p["name"] = name;
@@ -216,6 +299,10 @@ void NetworkManager::createRoom(const std::string& name, const std::string& avat
 }
 
 void NetworkManager::joinRoom(const std::string& code, const std::string& name, const std::string& avatarStyle) {
+    pendingRequest.intent = INTENT_JOIN_ROOM;
+    pendingRequest.roomCode = code;
+    pendingRequest.name = name;
+    pendingRequest.avatarStyle = avatarStyle;
 #if defined(NLOHMANN_JSON_VERSION_MAJOR) || defined(INCLUDE_NLOHMANN_JSON_HPP_)
     json p;
     p["roomCode"] = code;
@@ -226,6 +313,9 @@ void NetworkManager::joinRoom(const std::string& code, const std::string& name, 
 }
 
 void NetworkManager::quickPlay(const std::string& name, const std::string& avatarStyle) {
+    pendingRequest.intent = INTENT_QUICK_PLAY;
+    pendingRequest.name = name;
+    pendingRequest.avatarStyle = avatarStyle;
 #if defined(NLOHMANN_JSON_VERSION_MAJOR) || defined(INCLUDE_NLOHMANN_JSON_HPP_)
     json p;
     p["name"] = name;
@@ -234,13 +324,14 @@ void NetworkManager::quickPlay(const std::string& name, const std::string& avata
 #endif
 }
 
-void NetworkManager::sendInput(bool left, bool right, bool up, bool jump, float aimAngle) {
+void NetworkManager::sendInput(bool left, bool right, bool up, bool jump, float aimAngle, bool reload) {
 #if defined(NLOHMANN_JSON_VERSION_MAJOR) || defined(INCLUDE_NLOHMANN_JSON_HPP_)
     json p;
     p["left"] = left;
     p["right"] = right;
     p["up"] = up;
     p["jump"] = jump;
+    p["reload"] = reload;
     p["aimAngle"] = aimAngle;
     sendJson("input", &p);
 #endif
@@ -280,14 +371,15 @@ void NetworkManager::sendRemoveBot() {
 
 void NetworkManager::sendPing() {
 #if defined(NLOHMANN_JSON_VERSION_MAJOR) || defined(INCLUDE_NLOHMANN_JSON_HPP_)
-    lastPingSent = GetCurrentTimeMs();
     json p;
-    p["clientTime"] = lastPingSent;
+    lastPingSent = GetCurrentTimeMs();
+    p["timestamp"] = lastPingSent;
     sendJson("ping", &p);
 #endif
 }
 
 void NetworkManager::leaveRoom() {
-    sendJson("leave_room", nullptr);
+    pendingRequest.intent = INTENT_NONE;
+    sendJson("leave", nullptr);
     roomCode.clear();
 }
